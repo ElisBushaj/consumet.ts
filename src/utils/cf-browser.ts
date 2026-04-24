@@ -149,24 +149,13 @@ export async function resolveAnimeKaiIframe(iframeUrl: string): Promise<ResolveR
       throw new Error(`Failed to navigate to iframe URL: ${(err as Error).message}`);
     }
 
-    // Poll for CF challenge to clear (title changes from "Just a moment...").
-    const cfDeadline = Date.now() + CF_WAIT_MS;
-    let cleared = false;
-    while (Date.now() < cfDeadline) {
-      const title: string = await page.title().catch(() => '');
-      if (!/Just a moment/i.test(title)) {
-        cleared = true;
-        break;
-      }
-      await new Promise(r => setTimeout(r, POLL_MS));
-    }
-    if (!cleared) {
-      throw new Error('Cloudflare challenge did not clear within timeout');
-    }
-
-    // Wait for the master m3u8 to be intercepted.
-    const sourcesDeadline = Date.now() + SOURCES_WAIT_MS;
-    while (Date.now() < sourcesDeadline && captured.sources.length === 0) {
+    // The page may briefly change title during the CF redirect dance, so
+    // checking title alone is unreliable. The player only contacts megaup
+    // after CF clears, so "we've seen any megaup.* response" is a stronger
+    // signal that the challenge passed. Combine both signals: keep going
+    // until we either capture an m3u8 or hit the deadline.
+    const deadline = Date.now() + CF_WAIT_MS + SOURCES_WAIT_MS;
+    while (Date.now() < deadline && captured.sources.length === 0) {
       await new Promise(r => setTimeout(r, POLL_MS));
     }
     if (captured.sources.length === 0) {
