@@ -3,6 +3,7 @@ Object.defineProperty(exports, "__esModule", { value: true });
 const cheerio_1 = require("cheerio");
 const models_1 = require("../../models");
 const extractors_1 = require("../../extractors");
+const cf_browser_1 = require("../../utils/cf-browser");
 const { GenerateToken, DecodeIframeData } = new extractors_1.MegaUp();
 /**
  * Parses an AJAX response that may come as:
@@ -231,6 +232,18 @@ class AnimeKai extends models_1.AnimeParser {
         this.fetchEpisodeSources = async (episodeId, server = models_1.StreamingServers.MegaUp, subOrDub = models_1.SubOrSub.SUB) => {
             if (episodeId.startsWith('http')) {
                 const serverUrl = new URL(episodeId);
+                // anikai.to wraps every server URL in /iframe/<token>, which is
+                // Cloudflare-protected. The MegaUp extractor's bare axios call can't
+                // pass CF, so we drive a real browser via resolveAnimeKaiIframe to
+                // capture the m3u8 + .vtt URLs the player loads.
+                if (serverUrl.hostname.endsWith('anikai.to') && serverUrl.pathname.startsWith('/iframe/')) {
+                    const { sources, subtitles } = await (0, cf_browser_1.resolveAnimeKaiIframe)(serverUrl.href);
+                    return {
+                        headers: { Referer: serverUrl.href },
+                        sources,
+                        subtitles,
+                    };
+                }
                 switch (server) {
                     case models_1.StreamingServers.MegaUp:
                         return {

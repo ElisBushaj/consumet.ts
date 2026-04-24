@@ -15,6 +15,7 @@ import {
 } from '../../models';
 
 import { MegaUp } from '../../extractors';
+import { resolveAnimeKaiIframe } from '../../utils/cf-browser';
 
 const { GenerateToken, DecodeIframeData } = new MegaUp();
 
@@ -556,6 +557,18 @@ class AnimeKai extends AnimeParser {
   ): Promise<ISource> => {
     if (episodeId.startsWith('http')) {
       const serverUrl = new URL(episodeId);
+      // anikai.to wraps every server URL in /iframe/<token>, which is
+      // Cloudflare-protected. The MegaUp extractor's bare axios call can't
+      // pass CF, so we drive a real browser via resolveAnimeKaiIframe to
+      // capture the m3u8 + .vtt URLs the player loads.
+      if (serverUrl.hostname.endsWith('anikai.to') && serverUrl.pathname.startsWith('/iframe/')) {
+        const { sources, subtitles } = await resolveAnimeKaiIframe(serverUrl.href);
+        return {
+          headers: { Referer: serverUrl.href },
+          sources,
+          subtitles,
+        };
+      }
       switch (server) {
         case StreamingServers.MegaUp:
           return {

@@ -68,6 +68,9 @@
     "node-fetch": "^2.7.0",
     "yarn": "^1.22.22"
   },
+  "optionalDependencies": {
+    "puppeteer-real-browser": "^1.4.4"
+  },
   "devDependencies": {
     "@commitlint/cli": "^17.6.3",
     "@commitlint/config-angular": "^17.6.3",

@@ -4,9 +4,53 @@
 const animekai = new ANIME.AnimeKai();
 ```
 
-> **⚠️ Cloudflare Protection:** AnimeKai is heavily protected by Cloudflare. To use this provider reliably, you **must** configure a CORS proxy (such as [Whatever Origin](https://github.com/nicholasgasior/whatever-origin) or similar). Without a proxy, most requests will be blocked by Cloudflare challenges.
+> **⚠️ `fetchEpisodeSources` requires a real browser.** AnimeKai wraps every video URL in `https://anikai.to/iframe/<token>`, which is protected by a Cloudflare non-interactive challenge. Plain HTTP clients (axios, got, got-scraping) cannot pass it. The library uses [`puppeteer-real-browser`](https://www.npmjs.com/package/puppeteer-real-browser) to drive a real Chrome through the challenge and intercept the underlying m3u8 + subtitle URLs.
+>
+> Search, info, servers, schedule, genres, browse, and the `fetch*` listing methods all work with normal HTTP and do not require any of the below.
 
-<h3>Using a CORS Proxy</h3>
+<h3>Runtime requirements for fetchEpisodeSources</h3>
+
+`puppeteer-real-browser` is declared as an `optionalDependency`, so it installs automatically with most package managers. In addition you need:
+
+| Requirement | Linux server | Linux desktop | macOS | Windows |
+|---|---|---|---|---|
+| Google Chrome (or Chromium) installed | Required | Required | Required | Required |
+| Display (X server) | Use `xvfb` | Real display works | Built in | Built in |
+| Visible window during request | Hidden via xvfb | Window flashes briefly | Window pops up | Window pops up |
+
+**Linux server (e.g. Docker, Cloud Run, Apify Actor):**
+```bash
+apt-get install -y google-chrome-stable xvfb
+# then start your app with:
+xvfb-run -a node dist/index.js
+```
+
+Or in a long-running container, run an Xvfb daemon and export `DISPLAY=:99`:
+```bash
+Xvfb :99 -screen 0 1280x800x24 &
+export DISPLAY=:99
+node dist/index.js
+```
+
+For Apify, the `apify/actor-node-puppeteer-chrome` base image bundles both. For generic Docker, install `google-chrome-stable` plus its system libs (`libnss3`, `libatk-bridge2.0-0`, `libgtk-3-0`, fonts, etc.).
+
+**Vercel / AWS Lambda / Cloud Run gen 1:** not supported — there is nowhere to run a real browser. Use a long-running runtime (Cloud Run gen 2 with sufficient memory, Apify, a VPS) instead.
+
+<h3>Performance</h3>
+
+The library lazily launches one Chrome instance per Node process and reuses it across `fetchEpisodeSources` calls. Once Cloudflare issues `cf_clearance`, subsequent requests skip the challenge entirely.
+
+| Call | Latency |
+|---|---|
+| First call after process start | ~6–8 s (browser launch + CF challenge solve + capture) |
+| Subsequent calls (warm browser, valid cf_clearance) | ~1 s |
+| After 10 minutes idle | Browser auto-closes; next call is cold again |
+
+<h3>Process cleanup</h3>
+
+The library installs handlers for `SIGINT`, `SIGTERM`, and `SIGHUP` that close the browser before the process exits, so you should not see orphan Chrome processes after a normal restart. `SIGKILL` (`kill -9`) cannot be intercepted; use it only as a last resort.
+
+<h3>Optional: a CORS proxy for the lighter HTTP endpoints</h3>
 
 Pass a `ProxyConfig` object when instantiating the provider. The `encodeUrl` option ensures the target URL is encoded via `encodeURIComponent` before being appended to the proxy URL — this is required for CORS proxies that expect the target URL as a query parameter value.
 
