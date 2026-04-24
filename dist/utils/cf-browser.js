@@ -129,17 +129,21 @@ async function resolveAnimeKaiIframe(iframeUrl) {
     const seenSources = new Set();
     const seenSubs = new Set();
     let respCount = 0;
-    const responseHosts = new Set();
+    const responseHosts = new Map();
+    const allResponseUrls = [];
     const onResponse = (res) => {
         const url = res.url();
         respCount++;
         if (DEBUG) {
             try {
-                responseHosts.add(new URL(url).host);
+                const host = new URL(url).host;
+                responseHosts.set(host, (responseHosts.get(host) || 0) + 1);
             }
             catch {
                 // ignore
             }
+            if (allResponseUrls.length < 80)
+                allResponseUrls.push(`${res.status()} ${url}`);
         }
         if (M3U8_RE.test(url) && !seenSources.has(url)) {
             seenSources.add(url);
@@ -178,8 +182,21 @@ async function resolveAnimeKaiIframe(iframeUrl) {
             await new Promise(r => setTimeout(r, POLL_MS));
         }
         if (captured.sources.length === 0) {
-            const detail = DEBUG ? ` (responses=${respCount}, hosts=${[...responseHosts].join(',')})` : '';
-            throw new Error(`No streaming sources intercepted from player${detail}`);
+            if (DEBUG) {
+                const title = await page.title().catch(() => '');
+                const url = page.url();
+                const hostSummary = [...responseHosts.entries()].map(([h, n]) => `${h}=${n}`).join(', ');
+                console.error('[cf-browser] no-sources diagnostic:', {
+                    title,
+                    url,
+                    respCount,
+                    hosts: hostSummary,
+                });
+                console.error('[cf-browser] all captured response urls:');
+                for (const u of allResponseUrls)
+                    console.error('  ', u);
+            }
+            throw new Error('No streaming sources intercepted from player');
         }
         // The player loads subtitle .vtt files shortly after the m3u8. Give them
         // a moment to arrive — without this grace period, warm requests exit
