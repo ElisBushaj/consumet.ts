@@ -41,10 +41,11 @@ const MEGAUP_E_RE = /^https?:\/\/megaup\.[a-z]+\/e\//;
 const SUB_FILENAME_LANG_RE = /\/subs\/([a-z]{2,3})_/i;
 const IDLE_TEARDOWN_MS = 10 * 60 * 1000; // tear browser down after 10 min idle
 const NAV_TIMEOUT_MS = 60000;
-const CF_WAIT_MS = 30000;
-const SOURCES_WAIT_MS = 15000;
+const CF_WAIT_MS = 45000;
+const SOURCES_WAIT_MS = 45000;
 const POST_SOURCE_GRACE_MS = 1500; // after first m3u8, wait briefly for subs to load
 const POLL_MS = 250;
+const DEBUG = process.env.CF_BROWSER_DEBUG === '1';
 let browserPromise = null;
 let idleTimer = null;
 let exitHandlersRegistered = false;
@@ -127,8 +128,19 @@ async function resolveAnimeKaiIframe(iframeUrl) {
     const captured = { sources: [], subtitles: [] };
     const seenSources = new Set();
     const seenSubs = new Set();
+    let respCount = 0;
+    const responseHosts = new Set();
     const onResponse = (res) => {
         const url = res.url();
+        respCount++;
+        if (DEBUG) {
+            try {
+                responseHosts.add(new URL(url).host);
+            }
+            catch {
+                // ignore
+            }
+        }
         if (M3U8_RE.test(url) && !seenSources.has(url)) {
             seenSources.add(url);
             captured.sources.push({ url, isM3U8: true });
@@ -166,7 +178,8 @@ async function resolveAnimeKaiIframe(iframeUrl) {
             await new Promise(r => setTimeout(r, POLL_MS));
         }
         if (captured.sources.length === 0) {
-            throw new Error('No streaming sources intercepted from player');
+            const detail = DEBUG ? ` (responses=${respCount}, hosts=${[...responseHosts].join(',')})` : '';
+            throw new Error(`No streaming sources intercepted from player${detail}`);
         }
         // The player loads subtitle .vtt files shortly after the m3u8. Give them
         // a moment to arrive — without this grace period, warm requests exit

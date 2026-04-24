@@ -22,10 +22,11 @@ const SUB_FILENAME_LANG_RE = /\/subs\/([a-z]{2,3})_/i;
 
 const IDLE_TEARDOWN_MS = 10 * 60 * 1000; // tear browser down after 10 min idle
 const NAV_TIMEOUT_MS = 60_000;
-const CF_WAIT_MS = 30_000;
-const SOURCES_WAIT_MS = 15_000;
+const CF_WAIT_MS = 45_000;
+const SOURCES_WAIT_MS = 45_000;
 const POST_SOURCE_GRACE_MS = 1_500; // after first m3u8, wait briefly for subs to load
 const POLL_MS = 250;
+const DEBUG = process.env.CF_BROWSER_DEBUG === '1';
 
 let browserPromise: Promise<{ browser: any; page: any }> | null = null;
 let idleTimer: NodeJS.Timeout | null = null;
@@ -116,8 +117,18 @@ export async function resolveAnimeKaiIframe(iframeUrl: string): Promise<ResolveR
   const seenSources = new Set<string>();
   const seenSubs = new Set<string>();
 
+  let respCount = 0;
+  const responseHosts = new Set<string>();
   const onResponse = (res: any) => {
     const url: string = res.url();
+    respCount++;
+    if (DEBUG) {
+      try {
+        responseHosts.add(new URL(url).host);
+      } catch {
+        // ignore
+      }
+    }
     if (M3U8_RE.test(url) && !seenSources.has(url)) {
       seenSources.add(url);
       captured.sources.push({ url, isM3U8: true });
@@ -156,7 +167,8 @@ export async function resolveAnimeKaiIframe(iframeUrl: string): Promise<ResolveR
       await new Promise(r => setTimeout(r, POLL_MS));
     }
     if (captured.sources.length === 0) {
-      throw new Error('No streaming sources intercepted from player');
+      const detail = DEBUG ? ` (responses=${respCount}, hosts=${[...responseHosts].join(',')})` : '';
+      throw new Error(`No streaming sources intercepted from player${detail}`);
     }
 
     // The player loads subtitle .vtt files shortly after the m3u8. Give them
