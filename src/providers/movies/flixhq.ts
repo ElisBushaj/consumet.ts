@@ -1,7 +1,9 @@
+import { AxiosAdapter } from 'axios';
 import { load } from 'cheerio';
 
 import {
   MovieParser,
+  ProxyConfig,
   TvType,
   IMovieInfo,
   IEpisodeServer,
@@ -12,15 +14,45 @@ import {
 } from '../../models';
 import { MixDrop, VidCloud } from '../../extractors';
 
+// See sflix.ts for the rationale; an 8s axios timeout keeps the rapidapi-layer
+// fallback responsive when the upstream mirror is unreachable.
+const REQUEST_TIMEOUT_MS = 8_000;
+
 class FlixHQ extends MovieParser {
   override readonly name = 'FlixHQ';
-  protected override baseUrl = 'https://flixhq.to';
-  protected override logo = 'https://upload.wikimedia.org/wikipedia/commons/7/7a/MyAnimeList_Logo.png';
+  // The legacy `flixhq.to` origin is unreachable (~2026); `flixhq.ws` is the active
+  // mirror with the same SSR template the scraper expects.
+  protected override baseUrl = 'https://flixhq.ws';
+  protected override logo = 'https://flixhq.ws/images/favicon.png';
   protected override classPath = 'MOVIES.FlixHQ';
   override supportedTypes = new Set([TvType.MOVIE, TvType.TVSERIES]);
 
   private static readonly NAV_SELECTOR =
     'div.pre-pagination:nth-child(3) > nav:nth-child(1) > ul:nth-child(1)';
+
+  constructor(proxyConfig?: ProxyConfig, adapter?: AxiosAdapter) {
+    super(proxyConfig, adapter);
+    this.client.defaults.timeout = REQUEST_TIMEOUT_MS;
+  }
+
+  /**
+   * Normalize an anchor `href` (relative `/foo/bar` or absolute `https://host/foo/bar`)
+   * to a relative id like `foo/bar`. Returns '' for missing/empty hrefs.
+   */
+  private idFromHref(href?: string): string {
+    if (!href) return '';
+    return href.replace(this.baseUrl, '').replace(/^\/+/, '');
+  }
+
+  /**
+   * Build a fully-qualified url from an anchor `href`, regardless of whether
+   * the href is already absolute or relative to the site root.
+   */
+  private urlFromHref(href?: string): string {
+    if (!href) return this.baseUrl;
+    if (/^https?:\/\//i.test(href)) return href;
+    return `${this.baseUrl}${href.startsWith('/') ? '' : '/'}${href}`;
+  }
 
   /**
    * Search for movies or TV shows
@@ -45,11 +77,12 @@ class FlixHQ extends MovieParser {
       $('.film_list-wrap > div.flw-item').each((_, el) => {
         const $el = $(el);
         const releaseDate = $el.find('div.film-detail > div.fd-infor > span:nth-child(1)').text();
+        const href = $el.find('div.film-poster > a').attr('href');
 
         searchResult.results.push({
-          id: $el.find('div.film-poster > a').attr('href')?.slice(1)!,
+          id: this.idFromHref(href),
           title: $el.find('div.film-detail > h2 > a').attr('title')!,
-          url: `${this.baseUrl}${$el.find('div.film-poster > a').attr('href')}`,
+          url: this.urlFromHref(href),
           image: $el.find('div.film-poster > img').attr('data-src'),
           releaseDate: isNaN(parseInt(releaseDate)) ? undefined : releaseDate,
           seasons: releaseDate.includes('SS') ? parseInt(releaseDate.split('SS')[1]) : undefined,
@@ -73,7 +106,7 @@ class FlixHQ extends MovieParser {
     }
 
     const movieInfo: IMovieInfo = {
-      id: mediaId.split('to/').pop()!,
+      id: this.idFromHref(mediaId),
       title: '',
       url: mediaId,
     };
@@ -86,7 +119,7 @@ class FlixHQ extends MovieParser {
         'div.movie_information > div.container > div.m_i-related > div.film-related > section.block_area > div.block_area-content > div.film_list-wrap > div.flw-item'
       ).each((i, el) => {
         recommendationsArray.push({
-          id: $(el).find('div.film-poster > a').attr('href')?.slice(1)!,
+          id: this.idFromHref($(el).find('div.film-poster > a').attr('href')),
           title: $(el).find('div.film-detail > h3.film-name > a').text(),
           image: $(el).find('div.film-poster > img').attr('data-src'),
           duration:
@@ -313,7 +346,11 @@ class FlixHQ extends MovieParser {
   };
 
   /**
-   * Fetch spotlight/featured content
+   * Fetch spotlight/featured content.
+   *
+   * Note: as of 2026 the flixhq.ws homepage no longer renders the original
+   * `div.swiper-slide` hero carousel, so this method can legitimately return
+   * an empty `results` array. Update the selectors if the layout is restored.
    */
   fetchSpotlight = async (): Promise<ISearch<IMovieResult>> => {
     try {
@@ -325,11 +362,12 @@ class FlixHQ extends MovieParser {
       $('div.swiper-slide').each((_, el) => {
         const $el = $(el);
         const href = $el.find('a').attr('href');
+        const id = this.idFromHref(href);
 
         results.results.push({
-          id: href?.slice(1)!,
+          id,
           title: $el.find('a').attr('title')!,
-          url: `${this.baseUrl}${href}`,
+          url: this.urlFromHref(href),
           cover: $el
             ?.css('background-image')
             ?.replace(/url\(["']?(.+?)["']?\)/, '$1')
@@ -341,7 +379,7 @@ class FlixHQ extends MovieParser {
             .map((_, el) => $(el).text().trim())
             .get(),
           description: $el.find('.sc-desc').text().trim(),
-          type: href?.split('/')[1] === 'movie' ? TvType.MOVIE : TvType.TVSERIES,
+          type: id.split('/')[0] === 'movie' ? TvType.MOVIE : TvType.TVSERIES,
         });
       });
 
@@ -367,10 +405,11 @@ class FlixHQ extends MovieParser {
         .map((_, el) => {
           const $el = $(el);
           const firstSpan = $el.find('div.film-detail > div.fd-infor > span:nth-child(1)').text();
+          const href = $el.find('div.film-poster > a').attr('href');
           const result: any = {
-            id: $el.find('div.film-poster > a').attr('href')?.slice(1)!,
+            id: this.idFromHref(href),
             title: $el.find('div.film-detail > h3.film-name > a').attr('title')!,
-            url: `${this.baseUrl}${$el.find('div.film-poster > a').attr('href')}`,
+            url: this.urlFromHref(href),
             image: $el.find('div.film-poster > img').attr('data-src'),
             type: this.parseMediaType($el.find('div.film-detail > div.fd-infor > span.float-right').text()),
           };
@@ -408,10 +447,11 @@ class FlixHQ extends MovieParser {
         .map((_, el) => {
           const $el = $(el);
           const firstSpan = $el.find('div.film-detail > div.fd-infor > span:nth-child(1)').text();
+          const href = $el.find('div.film-poster > a').attr('href');
           const result: any = {
-            id: $el.find('div.film-poster > a').attr('href')?.slice(1)!,
+            id: this.idFromHref(href),
             title: $el.find('div.film-detail > h3.film-name > a').attr('title')!,
-            url: `${this.baseUrl}${$el.find('div.film-poster > a').attr('href')}`,
+            url: this.urlFromHref(href),
             image: $el.find('div.film-poster > img').attr('data-src'),
             type: this.parseMediaType($el.find('div.film-detail > div.fd-infor > span.float-right').text()),
           };
@@ -472,10 +512,11 @@ class FlixHQ extends MovieParser {
           $el.find('div.film-detail > div.fd-infor > span.float-right').text()
         );
 
+        const href = $el.find('div.film-poster > a').attr('href');
         const resultItem: IMovieResult = {
-          id: $el.find('div.film-poster > a').attr('href')?.slice(1) ?? '',
+          id: this.idFromHref(href),
           title: $el.find('div.film-detail > h2 > a, div.film-detail > h2.film-name > a').attr('title') ?? '',
-          url: `${this.baseUrl}${$el.find('div.film-poster > a').attr('href')}`,
+          url: this.urlFromHref(href),
           image: $el.find('div.film-poster > img').attr('data-src'),
           type,
         };

@@ -3,12 +3,17 @@ Object.defineProperty(exports, "__esModule", { value: true });
 const cheerio_1 = require("cheerio");
 const models_1 = require("../../models");
 const extractors_1 = require("../../extractors");
+// See sflix.ts for the rationale; an 8s axios timeout keeps the rapidapi-layer
+// fallback responsive when the upstream mirror is unreachable.
+const REQUEST_TIMEOUT_MS = 8000;
 class FlixHQ extends models_1.MovieParser {
-    constructor() {
-        super(...arguments);
+    constructor(proxyConfig, adapter) {
+        super(proxyConfig, adapter);
         this.name = 'FlixHQ';
-        this.baseUrl = 'https://flixhq.to';
-        this.logo = 'https://upload.wikimedia.org/wikipedia/commons/7/7a/MyAnimeList_Logo.png';
+        // The legacy `flixhq.to` origin is unreachable (~2026); `flixhq.ws` is the active
+        // mirror with the same SSR template the scraper expects.
+        this.baseUrl = 'https://flixhq.ws';
+        this.logo = 'https://flixhq.ws/images/favicon.png';
         this.classPath = 'MOVIES.FlixHQ';
         this.supportedTypes = new Set([models_1.TvType.MOVIE, models_1.TvType.TVSERIES]);
         /**
@@ -31,10 +36,11 @@ class FlixHQ extends models_1.MovieParser {
                 $('.film_list-wrap > div.flw-item').each((_, el) => {
                     const $el = $(el);
                     const releaseDate = $el.find('div.film-detail > div.fd-infor > span:nth-child(1)').text();
+                    const href = $el.find('div.film-poster > a').attr('href');
                     searchResult.results.push({
-                        id: $el.find('div.film-poster > a').attr('href')?.slice(1),
+                        id: this.idFromHref(href),
                         title: $el.find('div.film-detail > h2 > a').attr('title'),
-                        url: `${this.baseUrl}${$el.find('div.film-poster > a').attr('href')}`,
+                        url: this.urlFromHref(href),
                         image: $el.find('div.film-poster > img').attr('data-src'),
                         releaseDate: isNaN(parseInt(releaseDate)) ? undefined : releaseDate,
                         seasons: releaseDate.includes('SS') ? parseInt(releaseDate.split('SS')[1]) : undefined,
@@ -56,7 +62,7 @@ class FlixHQ extends models_1.MovieParser {
                 mediaId = `${this.baseUrl}/${mediaId}`;
             }
             const movieInfo = {
-                id: mediaId.split('to/').pop(),
+                id: this.idFromHref(mediaId),
                 title: '',
                 url: mediaId,
             };
@@ -66,7 +72,7 @@ class FlixHQ extends models_1.MovieParser {
                 const recommendationsArray = [];
                 $('div.movie_information > div.container > div.m_i-related > div.film-related > section.block_area > div.block_area-content > div.film_list-wrap > div.flw-item').each((i, el) => {
                     recommendationsArray.push({
-                        id: $(el).find('div.film-poster > a').attr('href')?.slice(1),
+                        id: this.idFromHref($(el).find('div.film-poster > a').attr('href')),
                         title: $(el).find('div.film-detail > h3.film-name > a').text(),
                         image: $(el).find('div.film-poster > img').attr('data-src'),
                         duration: $(el).find('div.film-detail > div.fd-infor > span.fdi-duration').text().replace('m', '') ?? null,
@@ -261,7 +267,11 @@ class FlixHQ extends models_1.MovieParser {
             return this.fetchByFilter('genre', genre, page);
         };
         /**
-         * Fetch spotlight/featured content
+         * Fetch spotlight/featured content.
+         *
+         * Note: as of 2026 the flixhq.ws homepage no longer renders the original
+         * `div.swiper-slide` hero carousel, so this method can legitimately return
+         * an empty `results` array. Update the selectors if the layout is restored.
          */
         this.fetchSpotlight = async () => {
             try {
@@ -271,10 +281,11 @@ class FlixHQ extends models_1.MovieParser {
                 $('div.swiper-slide').each((_, el) => {
                     const $el = $(el);
                     const href = $el.find('a').attr('href');
+                    const id = this.idFromHref(href);
                     results.results.push({
-                        id: href?.slice(1),
+                        id,
                         title: $el.find('a').attr('title'),
-                        url: `${this.baseUrl}${href}`,
+                        url: this.urlFromHref(href),
                         cover: $el
                             ?.css('background-image')
                             ?.replace(/url\(["']?(.+?)["']?\)/, '$1')
@@ -286,7 +297,7 @@ class FlixHQ extends models_1.MovieParser {
                             .map((_, el) => $(el).text().trim())
                             .get(),
                         description: $el.find('.sc-desc').text().trim(),
-                        type: href?.split('/')[1] === 'movie' ? models_1.TvType.MOVIE : models_1.TvType.TVSERIES,
+                        type: id.split('/')[0] === 'movie' ? models_1.TvType.MOVIE : models_1.TvType.TVSERIES,
                     });
                 });
                 return results;
@@ -295,6 +306,27 @@ class FlixHQ extends models_1.MovieParser {
                 throw new Error(err.message);
             }
         };
+        this.client.defaults.timeout = REQUEST_TIMEOUT_MS;
+    }
+    /**
+     * Normalize an anchor `href` (relative `/foo/bar` or absolute `https://host/foo/bar`)
+     * to a relative id like `foo/bar`. Returns '' for missing/empty hrefs.
+     */
+    idFromHref(href) {
+        if (!href)
+            return '';
+        return href.replace(this.baseUrl, '').replace(/^\/+/, '');
+    }
+    /**
+     * Build a fully-qualified url from an anchor `href`, regardless of whether
+     * the href is already absolute or relative to the site root.
+     */
+    urlFromHref(href) {
+        if (!href)
+            return this.baseUrl;
+        if (/^https?:\/\//i.test(href))
+            return href;
+        return `${this.baseUrl}${href.startsWith('/') ? '' : '/'}${href}`;
     }
     /**
      * Fetch content from home page by section title
@@ -309,10 +341,11 @@ class FlixHQ extends models_1.MovieParser {
                 .map((_, el) => {
                 const $el = $(el);
                 const firstSpan = $el.find('div.film-detail > div.fd-infor > span:nth-child(1)').text();
+                const href = $el.find('div.film-poster > a').attr('href');
                 const result = {
-                    id: $el.find('div.film-poster > a').attr('href')?.slice(1),
+                    id: this.idFromHref(href),
                     title: $el.find('div.film-detail > h3.film-name > a').attr('title'),
-                    url: `${this.baseUrl}${$el.find('div.film-poster > a').attr('href')}`,
+                    url: this.urlFromHref(href),
                     image: $el.find('div.film-poster > img').attr('data-src'),
                     type: this.parseMediaType($el.find('div.film-detail > div.fd-infor > span.float-right').text()),
                 };
@@ -347,10 +380,11 @@ class FlixHQ extends models_1.MovieParser {
                 .map((_, el) => {
                 const $el = $(el);
                 const firstSpan = $el.find('div.film-detail > div.fd-infor > span:nth-child(1)').text();
+                const href = $el.find('div.film-poster > a').attr('href');
                 const result = {
-                    id: $el.find('div.film-poster > a').attr('href')?.slice(1),
+                    id: this.idFromHref(href),
                     title: $el.find('div.film-detail > h3.film-name > a').attr('title'),
-                    url: `${this.baseUrl}${$el.find('div.film-poster > a').attr('href')}`,
+                    url: this.urlFromHref(href),
                     image: $el.find('div.film-poster > img').attr('data-src'),
                     type: this.parseMediaType($el.find('div.film-detail > div.fd-infor > span.float-right').text()),
                 };
@@ -397,10 +431,11 @@ class FlixHQ extends models_1.MovieParser {
                 const season = $el.find('div.film-detail > div.fd-infor > span:nth-child(1)').text();
                 const latestEpisode = $el.find('div.film-detail > div.fd-infor > span:nth-child(3)').text() || null;
                 const type = this.parseMediaType($el.find('div.film-detail > div.fd-infor > span.float-right').text());
+                const href = $el.find('div.film-poster > a').attr('href');
                 const resultItem = {
-                    id: $el.find('div.film-poster > a').attr('href')?.slice(1) ?? '',
+                    id: this.idFromHref(href),
                     title: $el.find('div.film-detail > h2 > a, div.film-detail > h2.film-name > a').attr('title') ?? '',
-                    url: `${this.baseUrl}${$el.find('div.film-poster > a').attr('href')}`,
+                    url: this.urlFromHref(href),
                     image: $el.find('div.film-poster > img').attr('data-src'),
                     type,
                 };

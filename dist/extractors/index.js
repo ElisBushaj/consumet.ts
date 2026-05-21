@@ -3,7 +3,7 @@ var __importDefault = (this && this.__importDefault) || function (mod) {
     return (mod && mod.__esModule) ? mod : { "default": mod };
 };
 Object.defineProperty(exports, "__esModule", { value: true });
-exports.MegaUp = exports.Voe = exports.VideoStr = exports.VidCloud = exports.StreamWish = exports.StreamTape = exports.StreamSB = exports.MegaCloud = exports.MixDrop = exports.Kwik = void 0;
+exports.VixSrc = exports.MegaUp = exports.Voe = exports.VideoStr = exports.VidCloud = exports.StreamWish = exports.StreamTape = exports.StreamSB = exports.MegaCloud = exports.MixDrop = exports.Kwik = void 0;
 const kwik_1 = __importDefault(require("./kwik"));
 exports.Kwik = kwik_1.default;
 const mixdrop_1 = __importDefault(require("./mixdrop"));
@@ -24,4 +24,6 @@ const voe_1 = __importDefault(require("./voe"));
 exports.Voe = voe_1.default;
 const megaup_1 = require("./megaup");
 Object.defineProperty(exports, "MegaUp", { enumerable: true, get: function () { return megaup_1.MegaUp; } });
+const vixsrc_1 = require("./vixsrc");
+Object.defineProperty(exports, "VixSrc", { enumerable: true, get: function () { return vixsrc_1.VixSrc; } });
 //# sourceMappingURL=index.js.map

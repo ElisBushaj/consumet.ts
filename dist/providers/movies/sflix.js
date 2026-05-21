@@ -3,10 +3,20 @@ Object.defineProperty(exports, "__esModule", { value: true });
 const cheerio_1 = require("cheerio");
 const models_1 = require("../../models");
 const extractors_1 = require("../../extractors");
+// Per-request timeout for scraping calls. The default axios timeout is
+// "no timeout", which means a dead mirror (e.g. HTTP 522 stalls, or DNS holes)
+// can hang requests for ~20-30 seconds before any layered fallback engages.
+// 8 seconds is short enough that a fallback provider kicks in promptly and
+// long enough to absorb typical CF cold-start latency.
+const REQUEST_TIMEOUT_MS = 8000;
 class SFlix extends models_1.MovieParser {
-    constructor() {
-        super(...arguments);
+    constructor(proxyConfig, adapter) {
+        super(proxyConfig, adapter);
         this.name = 'SFlix';
+        // WARNING: as of 2026 the SFlix brand appears effectively dead — `sflix.ps` returns
+        // HTTP 522, and the surviving sflix.{lol,pro,tv,…} domains are landing/parking pages
+        // that no longer serve the SSR `flw-item` template this scraper depends on. Consumers
+        // should treat SFlix as best-effort and prefer HiMovies / FlixHQ as primary.
         this.baseUrl = 'https://sflix.ps';
         this.logo = 'https://img.sflix.to/xxrz/100x100/100/a2/33/a233d4c4a1426ca77ec1d34deec62f71/a233d4c4a1426ca77ec1d34deec62f71.png';
         this.classPath = 'MOVIES.SFlix';
@@ -31,10 +41,11 @@ class SFlix extends models_1.MovieParser {
                 $('.film_list-wrap > div.flw-item').each((_, el) => {
                     const $el = $(el);
                     const releaseDate = $el.find('div.film-detail > div.fd-infor > span:nth-child(1)').text();
+                    const href = $el.find('div.film-poster > a').attr('href');
                     searchResult.results.push({
-                        id: $el.find('div.film-poster > a').attr('href')?.slice(1),
+                        id: this.idFromHref(href),
                         title: $el.find('div.film-detail > h2 > a').attr('title'),
-                        url: `${this.baseUrl}${$el.find('div.film-poster > a').attr('href')}`,
+                        url: this.urlFromHref(href),
                         image: $el.find('div.film-poster > img').attr('data-src'),
                         releaseDate: isNaN(parseInt(releaseDate)) ? undefined : releaseDate,
                         seasons: releaseDate.includes('SS') ? parseInt(releaseDate.split('SS')[1]) : undefined,
@@ -57,7 +68,7 @@ class SFlix extends models_1.MovieParser {
                 const { data } = await this.client.get(url);
                 const $ = (0, cheerio_1.load)(data);
                 const uid = $('.detail_page-watch').attr('data-id');
-                const extractedId = mediaId.split('to/').pop();
+                const extractedId = this.idFromHref(mediaId);
                 const title = $('.heading-name > a:nth-child(1)').text();
                 const movieInfo = {
                     id: extractedId,
@@ -234,14 +245,15 @@ class SFlix extends models_1.MovieParser {
                 $('div.swiper-slide').each((_, el) => {
                     const $el = $(el);
                     const href = $el.find('a').attr('href');
+                    const id = this.idFromHref(href);
                     results.results.push({
-                        id: href?.slice(1),
+                        id,
                         title: $el.find('a').attr('title'),
-                        url: `${this.baseUrl}${href}`,
+                        url: this.urlFromHref(href),
                         cover: $el.find('div.slide-photo > a > img').attr('src'),
                         rating: $el.find('.scd-item:nth-child(1)').text().trim(),
                         description: $el.find('.sc-desc').text().trim(),
-                        type: href?.split('/')[1] === 'movie' ? models_1.TvType.MOVIE : models_1.TvType.TVSERIES,
+                        type: id.split('/')[0] === 'movie' ? models_1.TvType.MOVIE : models_1.TvType.TVSERIES,
                     });
                 });
                 return results;
@@ -250,6 +262,27 @@ class SFlix extends models_1.MovieParser {
                 throw new Error(err.message);
             }
         };
+        this.client.defaults.timeout = REQUEST_TIMEOUT_MS;
+    }
+    /**
+     * Normalize an anchor `href` (relative `/foo/bar` or absolute `https://host/foo/bar`)
+     * to a relative id like `foo/bar`. Returns '' for missing/empty hrefs.
+     */
+    idFromHref(href) {
+        if (!href)
+            return '';
+        return href.replace(this.baseUrl, '').replace(/^\/+/, '');
+    }
+    /**
+     * Build a fully-qualified url from an anchor `href`, regardless of whether
+     * the href is already absolute or relative to the site root.
+     */
+    urlFromHref(href) {
+        if (!href)
+            return this.baseUrl;
+        if (/^https?:\/\//i.test(href))
+            return href;
+        return `${this.baseUrl}${href.startsWith('/') ? '' : '/'}${href}`;
     }
     /**
      * Fetch TV series episodes for all seasons
@@ -298,7 +331,7 @@ class SFlix extends models_1.MovieParser {
                 .trim()
                 .toLowerCase();
             recommendations.push({
-                id: $el.find('div.film-poster > a').attr('href')?.slice(1),
+                id: this.idFromHref($el.find('div.film-poster > a').attr('href')),
                 title: $el.find('div.film-detail > h3.film-name > a').text(),
                 image: $el.find('div.film-poster > img').attr('data-src'),
                 duration: $el.find('div.film-detail > div.fd-infor > span.fdi-duration').text().replace('m', '') || null,
@@ -319,10 +352,11 @@ class SFlix extends models_1.MovieParser {
             const results = $(`section.block_area:contains("${sectionTitle}") > div:nth-child(2) > div:nth-child(1) > div.flw-item`)
                 .map((_, el) => {
                 const $el = $(el);
+                const href = $el.find('div.film-poster > a').attr('href');
                 const result = {
-                    id: $el.find('div.film-poster > a').attr('href')?.slice(1),
+                    id: this.idFromHref(href),
                     title: $el.find('div.film-detail > h3.film-name > a').attr('title'),
-                    url: `${this.baseUrl}${$el.find('div.film-poster > a').attr('href')}`,
+                    url: this.urlFromHref(href),
                     image: $el.find('div.film-poster > img').attr('data-src'),
                     type: isTvShow ? models_1.TvType.TVSERIES : models_1.TvType.MOVIE,
                 };
@@ -357,10 +391,11 @@ class SFlix extends models_1.MovieParser {
             const results = $(`div#${divId} div.film_list-wrap div.flw-item`)
                 .map((_, el) => {
                 const $el = $(el);
+                const href = $el.find('div.film-poster > a').attr('href');
                 const result = {
-                    id: $el.find('div.film-poster > a').attr('href')?.slice(1),
+                    id: this.idFromHref(href),
                     title: $el.find('div.film-detail > h3.film-name > a').attr('title'),
-                    url: `${this.baseUrl}${$el.find('div.film-poster > a').attr('href')}`,
+                    url: this.urlFromHref(href),
                     image: $el.find('div.film-poster > img').attr('data-src'),
                     type: isTvShow ? models_1.TvType.TVSERIES : models_1.TvType.MOVIE,
                 };
@@ -405,13 +440,14 @@ class SFlix extends models_1.MovieParser {
                 : '.film_list-wrap > div.flw-item';
             $(selector).each((_, el) => {
                 const $el = $(el);
-                const href = $el.find('div.film-poster > a').attr('href')?.slice(1) ?? '';
-                const type = href.split('/')[0].toLowerCase() === 'movie' ? models_1.TvType.MOVIE : models_1.TvType.TVSERIES;
+                const rawHref = $el.find('div.film-poster > a').attr('href');
+                const id = this.idFromHref(rawHref);
+                const type = id.split('/')[0].toLowerCase() === 'movie' ? models_1.TvType.MOVIE : models_1.TvType.TVSERIES;
                 const episodeInfo = $el.find('div.film-detail > div.fd-infor > span:nth-child(3)').text();
                 const resultItem = {
-                    id: href,
+                    id,
                     title: $el.find('div.film-detail > h2.film-name > a').attr('title') ?? '',
-                    url: `${this.baseUrl}${$el.find('div.film-poster > a').attr('href')}`,
+                    url: this.urlFromHref(rawHref),
                     image: $el.find('div.film-poster > img').attr('data-src'),
                     type,
                 };
