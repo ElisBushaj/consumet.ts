@@ -1,7 +1,9 @@
+import { AxiosAdapter } from 'axios';
 import { load, CheerioAPI } from 'cheerio';
 
 import {
   MovieParser,
+  ProxyConfig,
   TvType,
   IMovieInfo,
   IEpisodeServer,
@@ -10,16 +12,46 @@ import {
   IMovieResult,
   ISearch,
 } from '../../models';
-import { MegaCloud, VidCloud, VideoStr } from '../../extractors';
+import { MegaCloud, VidCloud, VideoStr, VixSrc } from '../../extractors';
+
+// See sflix.ts for the rationale; an 8s axios timeout keeps the rapidapi-layer
+// fallback responsive when the upstream mirror is unreachable.
+const REQUEST_TIMEOUT_MS = 8_000;
 
 class HiMovies extends MovieParser {
   override readonly name = 'HiMovies';
-  protected override baseUrl = 'https://himovies.sx';
-  protected override logo = 'https://himovies.sx/images/group_1/theme_1/favicon.png';
+  // The legacy `himovies.sx` origin is unreachable (~2026); `himovies.bz` is the active
+  // mirror with the same SSR template the scraper expects.
+  protected override baseUrl = 'https://himovies.bz';
+  protected override logo = 'https://himovies.bz/images/group_1/theme_1/favicon.png';
   protected override classPath = 'MOVIES.HiMovies';
   override supportedTypes = new Set([TvType.MOVIE, TvType.TVSERIES]);
 
   private static readonly NAV_SELECTOR = 'div.pre-pagination > nav:nth-child(1) > ul:nth-child(1)';
+
+  constructor(proxyConfig?: ProxyConfig, adapter?: AxiosAdapter) {
+    super(proxyConfig, adapter);
+    this.client.defaults.timeout = REQUEST_TIMEOUT_MS;
+  }
+
+  /**
+   * Normalize an anchor `href` (relative `/foo/bar` or absolute `https://host/foo/bar`)
+   * to a relative id like `foo/bar`. Returns '' for missing/empty hrefs.
+   */
+  private idFromHref(href?: string): string {
+    if (!href) return '';
+    return href.replace(this.baseUrl, '').replace(/^\/+/, '');
+  }
+
+  /**
+   * Build a fully-qualified url from an anchor `href`, regardless of whether
+   * the href is already absolute or relative to the site root.
+   */
+  private urlFromHref(href?: string): string {
+    if (!href) return this.baseUrl;
+    if (/^https?:\/\//i.test(href)) return href;
+    return `${this.baseUrl}${href.startsWith('/') ? '' : '/'}${href}`;
+  }
 
   /**
    * Search for movies and TV shows
@@ -44,11 +76,12 @@ class HiMovies extends MovieParser {
       $('.film_list-wrap > div.flw-item').each((_, el) => {
         const $el = $(el);
         const releaseDate = $el.find('div.film-detail > div.fd-infor > span:nth-child(1)').text();
+        const href = $el.find('div.film-poster > a').attr('href');
 
         searchResult.results.push({
-          id: $el.find('div.film-poster > a').attr('href')?.slice(1)!,
+          id: this.idFromHref(href),
           title: $el.find('div.film-detail > h2 > a').attr('title')!,
-          url: `${this.baseUrl}${$el.find('div.film-poster > a').attr('href')}`,
+          url: this.urlFromHref(href),
           image: $el.find('div.film-poster > img').attr('data-src'),
           releaseDate: isNaN(parseInt(releaseDate)) ? undefined : releaseDate,
           seasons: releaseDate.includes('SS') ? parseInt(releaseDate.split('SS')[1]) : undefined,
@@ -74,7 +107,7 @@ class HiMovies extends MovieParser {
       const $ = load(data);
 
       const uid = $('.detail_page-watch').attr('data-id')!;
-      const extractedId = mediaId.split('sx/').pop()!;
+      const extractedId = this.idFromHref(mediaId);
       const title = $('.heading-name > a:nth-child(1)').text();
 
       const movieInfo: IMovieInfo = {
@@ -249,6 +282,46 @@ class HiMovies extends MovieParser {
   };
 
   /**
+   * Fetch spotlight/featured content from the home page swiper.
+   *
+   * HiMovies shares the same SSR template as SFlix; the swiper-slide selectors
+   * here mirror {@link SFlix.fetchSpotlight} so the two providers can be used
+   * interchangeably as primary/fallback for a `spotlight` route.
+   *
+   * Note: as of 2026 the himovies.bz homepage no longer renders the original
+   * `div.swiper-slide` hero carousel, so this method can legitimately return
+   * an empty `results` array. Update the selectors if the layout is restored.
+   */
+  fetchSpotlight = async (): Promise<ISearch<IMovieResult>> => {
+    try {
+      const { data } = await this.client.get(`${this.baseUrl}/home`);
+      const $ = load(data);
+
+      const results: ISearch<IMovieResult> = { results: [] };
+
+      $('div.swiper-slide').each((_, el) => {
+        const $el = $(el);
+        const href = $el.find('a').attr('href');
+        const id = this.idFromHref(href);
+
+        results.results.push({
+          id,
+          title: $el.find('a').attr('title')!,
+          url: this.urlFromHref(href),
+          cover: $el.find('div.slide-photo > a > img').attr('src'),
+          rating: $el.find('.scd-item:nth-child(1)').text().trim(),
+          description: $el.find('.sc-desc').text().trim(),
+          type: id.split('/')[0] === 'movie' ? TvType.MOVIE : TvType.TVSERIES,
+        });
+      });
+
+      return results;
+    } catch (err) {
+      throw new Error((err as Error).message);
+    }
+  };
+
+  /**
    * Fetch TV series episodes for all seasons
    * @param uid unique identifier
    */
@@ -301,7 +374,7 @@ class HiMovies extends MovieParser {
       const $el = $(el);
 
       recommendations.push({
-        id: $el.find('div.film-poster > a').attr('href')?.slice(1)!,
+        id: this.idFromHref($el.find('div.film-poster > a').attr('href')),
         title: $el.find('div.film-detail > h3.film-name > a').text(),
         image: $el.find('div.film-poster > img').attr('data-src'),
         duration:
@@ -332,10 +405,11 @@ class HiMovies extends MovieParser {
         .map((_, el) => {
           const $el = $(el);
           const firstSpan = $el.find('div.film-detail > div.fd-infor > span:nth-child(1)').text();
+          const href = $el.find('div.film-poster > a').attr('href');
           const result: any = {
-            id: $el.find('div.film-poster > a').attr('href')?.slice(1)!,
+            id: this.idFromHref(href),
             title: $el.find('div.film-detail > h3.film-name > a').attr('title')!,
-            url: `${this.baseUrl}${$el.find('div.film-poster > a').attr('href')}`,
+            url: this.urlFromHref(href),
             image: $el.find('div.film-poster > img').attr('data-src'),
             type: this.parseMediaType($el.find('div.film-detail > div.fd-infor > span.float-right').text()),
           };
@@ -377,10 +451,11 @@ class HiMovies extends MovieParser {
         .map((_, el) => {
           const $el = $(el);
           const firstSpan = $el.find('div.film-detail > div.fd-infor > span:nth-child(1)').text();
+          const href = $el.find('div.film-poster > a').attr('href');
           const result: any = {
-            id: $el.find('div.film-poster > a').attr('href')?.slice(1)!,
+            id: this.idFromHref(href),
             title: $el.find('div.film-detail > h3.film-name > a').attr('title')!,
-            url: `${this.baseUrl}${$el.find('div.film-poster > a').attr('href')}`,
+            url: this.urlFromHref(href),
             image: $el.find('div.film-poster > img').attr('data-src'),
             type: this.parseMediaType($el.find('div.film-detail > div.fd-infor > span.float-right').text()),
           };
@@ -451,10 +526,11 @@ class HiMovies extends MovieParser {
           $el.find('div.film-detail > div.fd-infor > span.float-right').text()
         );
 
+        const href = $el.find('div.film-poster > a').attr('href');
         const resultItem: IMovieResult = {
-          id: $el.find('div.film-poster > a').attr('href')?.slice(1) ?? '',
+          id: this.idFromHref(href),
           title: $el.find('div.film-detail > h2 > a, div.film-detail > h2.film-name > a').attr('title') ?? '',
-          url: `${this.baseUrl}${$el.find('div.film-poster > a').attr('href')}`,
+          url: this.urlFromHref(href),
           image: $el.find('div.film-poster > img').attr('data-src'),
           type,
         };
@@ -477,12 +553,23 @@ class HiMovies extends MovieParser {
   }
 
   /**
-   * Extract sources from streaming server
-   * @param episodeUrl episode URL
-   * @param server streaming server type
+   * Extract sources from a streaming-server iframe URL.
+   *
+   * Dispatch is by **hostname**, not by the requested `StreamingServers` enum,
+   * because himovies.bz's three "upcloud / akcloud / megacloud" labels all
+   * resolve to *different* third-party players (vidfast.pro, vixsrc.to,
+   * primesrc.me as of 2026) — the user-facing label doesn't predict the
+   * player technology behind it. The `server` argument is kept for backward
+   * compatibility but only used as a tie-breaker for legacy MegaCloud hosts.
    */
   private async extractFromServer(episodeUrl: string, server: StreamingServers): Promise<ISource> {
     const serverUrl = new URL(episodeUrl);
+    const host = serverUrl.hostname.toLowerCase();
+
+    if (host === 'vixsrc.to' || host.endsWith('.vixsrc.to')) {
+      const extracted = await new VixSrc(this.proxyConfig, this.adapter).extract(serverUrl);
+      return extracted as ISource;
+    }
 
     switch (server) {
       case StreamingServers.UpCloud:

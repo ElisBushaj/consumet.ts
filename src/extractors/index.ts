@@ -8,5 +8,18 @@ import VideoStr from './videostr';
 import MegaCloud from './megacloud';
 import Voe from './voe';
 import { MegaUp } from './megaup';
+import { VixSrc } from './vixsrc';
 
-export { Kwik, MixDrop, MegaCloud, StreamSB, StreamTape, StreamWish, VidCloud, VideoStr, Voe, MegaUp };
+export {
+  Kwik,
+  MixDrop,
+  MegaCloud,
+  StreamSB,
+  StreamTape,
+  StreamWish,
+  VidCloud,
+  VideoStr,
+  Voe,
+  MegaUp,
+  VixSrc,
+};

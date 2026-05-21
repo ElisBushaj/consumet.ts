@@ -32,20 +32,36 @@ var __importStar = (this && this.__importStar) || (function () {
         return result;
     };
 })();
+var __importDefault = (this && this.__importDefault) || function (mod) {
+    return (mod && mod.__esModule) ? mod : { "default": mod };
+};
 Object.defineProperty(exports, "__esModule", { value: true });
 exports.closeAnimeKaiBrowser = void 0;
+exports.resolveAnimeKaiIframeHttp = resolveAnimeKaiIframeHttp;
 exports.resolveAnimeKaiIframe = resolveAnimeKaiIframe;
+exports.resolveAnimeKaiIframeBrowser = resolveAnimeKaiIframeBrowser;
+const axios_1 = __importDefault(require("axios"));
+const extractors_1 = require("../extractors");
+const MEGAUP_IFRAME_RE = /<iframe[^>]+src=["']([^"']*megaup\.[a-z]+\/e\/[^"'?]+)/i;
+const IFRAME_FETCH_TIMEOUT_MS = 10000;
 const M3U8_RE = /\.m3u8(\?|$)/i;
 const VTT_RE = /\.vtt(\?|$)/i;
 const MEGAUP_E_RE = /^https?:\/\/megaup\.[a-z]+\/e\//;
 const SUB_FILENAME_LANG_RE = /\/subs\/([a-z]{2,3})_/i;
 const IDLE_TEARDOWN_MS = 10 * 60 * 1000; // tear browser down after 10 min idle
-const NAV_TIMEOUT_MS = 60000;
-const CF_WAIT_MS = 45000;
-const SOURCES_WAIT_MS = 45000;
+const NAV_TIMEOUT_MS = numFromEnv('ANIMEKAI_NAV_TIMEOUT_MS', 60000);
+const CF_WAIT_MS = numFromEnv('ANIMEKAI_CF_WAIT_MS', 10000);
+const SOURCES_WAIT_MS = numFromEnv('ANIMEKAI_SOURCES_WAIT_MS', 10000);
 const POST_SOURCE_GRACE_MS = 1500; // after first m3u8, wait briefly for subs to load
 const POLL_MS = 250;
 const DEBUG = process.env.CF_BROWSER_DEBUG === '1';
+function numFromEnv(name, fallback) {
+    const raw = process.env[name];
+    if (!raw)
+        return fallback;
+    const n = Number(raw);
+    return Number.isFinite(n) && n > 0 ? n : fallback;
+}
 let browserPromise = null;
 let idleTimer = null;
 let exitHandlersRegistered = false;
@@ -120,10 +136,64 @@ function langFromSubUrl(url) {
     return m ? m[1] : 'unknown';
 }
 /**
- * Open the iframe URL, let CF clear, capture the m3u8 + .vtt URLs the JW
- * player loads, and return them as an ISource-shaped result.
+ * HTTP-only resolution: fetch the /iframe page (a tiny stub) directly, extract
+ * the embedded megaup.<tld>/e/<id> URL, and run the MegaUp extractor on it.
+ *
+ * Works without a browser, so this is the default path on Vercel and other
+ * headless environments. If Cloudflare ever fronts the /iframe wrapper with
+ * a real challenge, this will throw and callers can opt in to the browser
+ * path with `ANIMEKAI_USE_BROWSER=1`.
+ */
+async function resolveAnimeKaiIframeHttp(iframeUrl) {
+    const { data: html } = await axios_1.default.get(iframeUrl, {
+        timeout: IFRAME_FETCH_TIMEOUT_MS,
+        responseType: 'text',
+        transformResponse: r => r,
+        headers: {
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+            Accept: 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+            'Accept-Language': 'en-US,en;q=0.9',
+            Referer: 'https://anikai.to/',
+        },
+    });
+    const m = MEGAUP_IFRAME_RE.exec(typeof html === 'string' ? html : String(html));
+    if (!m) {
+        throw new Error('AnimeKai iframe: could not locate megaup URL (possibly behind a Cloudflare challenge; ' +
+            'set ANIMEKAI_USE_BROWSER=1 to fall back to puppeteer-real-browser).');
+    }
+    const megaupUrl = new URL(m[1]);
+    const extracted = await new extractors_1.MegaUp().extract(megaupUrl);
+    return {
+        sources: extracted.sources ?? [],
+        subtitles: extracted.subtitles ?? [],
+    };
+}
+/**
+ * Default entry point. Tries the HTTP path first; only falls back to the
+ * heavyweight browser path when explicitly enabled (`ANIMEKAI_USE_BROWSER=1`).
+ *
+ * This keeps Vercel-style deploys fast and predictable while still giving
+ * power users an opt-in escape hatch for the rare case where Cloudflare
+ * starts gating the /iframe wrapper itself.
  */
 async function resolveAnimeKaiIframe(iframeUrl) {
+    try {
+        return await resolveAnimeKaiIframeHttp(iframeUrl);
+    }
+    catch (err) {
+        if (process.env.ANIMEKAI_USE_BROWSER !== '1')
+            throw err;
+        if (DEBUG) {
+            console.error('[cf-browser] HTTP fallback failed, escalating to puppeteer-real-browser:', err.message);
+        }
+        return resolveAnimeKaiIframeBrowser(iframeUrl);
+    }
+}
+/**
+ * Open the iframe URL in a real browser, let CF clear, capture the m3u8 + .vtt
+ * URLs the JW player loads, and return them as an ISource-shaped result.
+ */
+async function resolveAnimeKaiIframeBrowser(iframeUrl) {
     const { page } = await getBrowser();
     const captured = { sources: [], subtitles: [] };
     const seenSources = new Set();

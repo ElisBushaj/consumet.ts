@@ -1,4 +1,5 @@
-import { MovieParser, TvType, IMovieInfo, IEpisodeServer, StreamingServers, ISource, IMovieResult, ISearch } from '../../models';
+import { AxiosAdapter } from 'axios';
+import { MovieParser, ProxyConfig, TvType, IMovieInfo, IEpisodeServer, StreamingServers, ISource, IMovieResult, ISearch } from '../../models';
 declare class FlixHQ extends MovieParser {
     readonly name = "FlixHQ";
     protected baseUrl: string;
@@ -6,6 +7,17 @@ declare class FlixHQ extends MovieParser {
     protected classPath: string;
     supportedTypes: Set<TvType>;
     private static readonly NAV_SELECTOR;
+    constructor(proxyConfig?: ProxyConfig, adapter?: AxiosAdapter);
+    /**
+     * Normalize an anchor `href` (relative `/foo/bar` or absolute `https://host/foo/bar`)
+     * to a relative id like `foo/bar`. Returns '' for missing/empty hrefs.
+     */
+    private idFromHref;
+    /**
+     * Build a fully-qualified url from an anchor `href`, regardless of whether
+     * the href is already absolute or relative to the site root.
+     */
+    private urlFromHref;
     /**
      * Search for movies or TV shows
      * @param query search query string
@@ -59,7 +71,11 @@ declare class FlixHQ extends MovieParser {
      */
     fetchByGenre: (genre: string, page?: number) => Promise<ISearch<IMovieResult>>;
     /**
-     * Fetch spotlight/featured content
+     * Fetch spotlight/featured content.
+     *
+     * Note: as of 2026 the flixhq.ws homepage no longer renders the original
+     * `div.swiper-slide` hero carousel, so this method can legitimately return
+     * an empty `results` array. Update the selectors if the layout is restored.
      */
     fetchSpotlight: () => Promise<ISearch<IMovieResult>>;
     /**

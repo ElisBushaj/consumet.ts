@@ -1,4 +1,5 @@
 import { ANIME } from '../../src/providers';
+import { resolveAnimeKaiIframeHttp } from '../../src/utils/cf-browser';
 
 jest.setTimeout(120000);
 
@@ -105,4 +106,19 @@ test('fetchEpisodeServers: returns a filled array of episode servers', async () 
   expect(servers.length).toBeGreaterThan(0);
   expect(servers[0]).toHaveProperty('name');
   expect(servers[0]).toHaveProperty('url');
+});
+
+test('resolveAnimeKaiIframeHttp: extracts sources without a browser', async () => {
+  // Pure-HTTP resolution path. We need a current iframe URL, so the test pulls
+  // one fresh from fetchEpisodeServers. This guards against the headless-Linux
+  // / Vercel regression that motivated the HTTP fallback in the first place.
+  const animekaiNoProxy = new ANIME.AnimeKai();
+  const servers = await animekaiNoProxy.fetchEpisodeServers('naruto-9r5k$ep=1$token=e9298OH2tROylH1c0ceX');
+  const iframe = servers.find(s => /\/iframe\//.test(s.url))?.url;
+  expect(iframe).toBeTruthy();
+
+  const { sources } = await resolveAnimeKaiIframeHttp(iframe!);
+  expect(sources.length).toBeGreaterThan(0);
+  expect(sources[0]).toHaveProperty('url');
+  expect(sources[0].isM3U8).toBe(true);
 });
